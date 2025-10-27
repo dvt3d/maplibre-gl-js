@@ -1508,9 +1508,7 @@ describe('Style.setGlobalState', () => {
         style.sourceCaches['circle-source-id'].reload = vi.fn();
 
         style.setGlobalState({circleColor: {default: 'red'}});
-        style.update({
-            globalState: style.getGlobalState()
-        } as EvaluationParameters);
+        style.update({} as EvaluationParameters);
 
         expect(style.sourceCaches['circle-source-id'].resume).toHaveBeenCalled();
         expect(style.sourceCaches['circle-source-id'].reload).toHaveBeenCalled();
@@ -1570,9 +1568,7 @@ describe('Style.setGlobalState', () => {
         style.sourceCaches['circle-source-id'].reload = vi.fn();
 
         style.setGlobalState({circleColor: {default: 'red'}});
-        style.update({
-            globalState: style.getGlobalState()
-        } as EvaluationParameters);
+        style.update({} as EvaluationParameters);
 
         expect(style.sourceCaches['circle-source-id'].resume).not.toHaveBeenCalled();
         expect(style.sourceCaches['circle-source-id'].reload).not.toHaveBeenCalled();
@@ -1601,9 +1597,7 @@ describe('Style.setGlobalState', () => {
         style.sourceCaches['circle-source-id'].reload = vi.fn();
 
         style.setGlobalState({circleColor: {default: 'red'}});
-        style.update({
-            globalState: style.getGlobalState()
-        } as EvaluationParameters);
+        style.update({} as EvaluationParameters);
 
         expect(style.sourceCaches['circle-source-id'].resume).not.toHaveBeenCalled();
         expect(style.sourceCaches['circle-source-id'].reload).not.toHaveBeenCalled();
@@ -1807,9 +1801,7 @@ describe('Style.setGlobalStateProperty', () => {
         style.sourceCaches['circle-source-id'].reload = vi.fn();
 
         style.setGlobalStateProperty('circleColor', 'red');
-        style.update({
-            globalState: style.getGlobalState()
-        } as EvaluationParameters);
+        style.update({} as EvaluationParameters);
 
         expect(style.sourceCaches['circle-source-id'].resume).toHaveBeenCalled();
         expect(style.sourceCaches['circle-source-id'].reload).toHaveBeenCalled();
@@ -1869,9 +1861,7 @@ describe('Style.setGlobalStateProperty', () => {
         style.sourceCaches['circle-source-id'].reload = vi.fn();
 
         style.setGlobalStateProperty('circleColor', 'red');
-        style.update({
-            globalState: style.getGlobalState()
-        } as EvaluationParameters);
+        style.update({} as EvaluationParameters);
 
         expect(style.sourceCaches['circle-source-id'].resume).not.toHaveBeenCalled();
         expect(style.sourceCaches['circle-source-id'].reload).not.toHaveBeenCalled();
@@ -1900,9 +1890,7 @@ describe('Style.setGlobalStateProperty', () => {
         style.sourceCaches['circle-source-id'].reload = vi.fn();
 
         style.setGlobalStateProperty('circleColor', 'red');
-        style.update({
-            globalState: style.getGlobalState()
-        } as EvaluationParameters);
+        style.update({} as EvaluationParameters);
 
         expect(style.sourceCaches['circle-source-id'].resume).not.toHaveBeenCalled();
         expect(style.sourceCaches['circle-source-id'].reload).not.toHaveBeenCalled();
@@ -3142,6 +3130,39 @@ describe('Style.query*Features', () => {
         expect(errors).toBe(0);
     });
 
+    test('style adds global-state to querySourceFeatures', async () => {
+        const sourceCache = style.sourceCaches['geojson'];
+        const querySourceFeatures = vi.fn().mockReturnValue([]);
+        vi.spyOn(sourceCache, 'getRenderableIds').mockReturnValue(['symbol']);
+        vi.spyOn(sourceCache, 'getTileByID').mockReturnValue({
+            tileID: new OverscaledTileID(0, 0, 0, 0, 0),
+            querySourceFeatures
+        } as unknown as Tile);
+        style.querySourceFeatures('geojson', {filter: '[]' as any, validate: false});
+        expect(querySourceFeatures).toHaveBeenCalled();
+        const params = querySourceFeatures.mock.lastCall[1];
+        expect(params).toHaveProperty('globalState');
+    });
+
+    test('style adds global-state to queryRenderedFeatures', async () => {
+        const sourceCache = style.sourceCaches['geojson'];
+        sourceCache.transform = transform;
+        const queryRenderedFeatures = vi.fn().mockReturnValue([]);
+        vi.spyOn(sourceCache, 'tilesIn').mockReturnValue([{
+            tile: {
+                queryRenderedFeatures
+            } as unknown as Tile,
+            tileID: new OverscaledTileID(0, 0, 0, 0, 0),
+            queryGeometry: [{x: 0, y: 0} as Point],
+            cameraQueryGeometry: [{x: 0, y: 0} as Point],
+            scale: 1,
+        }]);
+        style.queryRenderedFeatures([{x: 0, y: 0} as Point], {filter: '[]' as any, validate: false}, transform);
+        expect(queryRenderedFeatures).toHaveBeenCalled();
+        const params = queryRenderedFeatures.mock.lastCall[6];
+        expect(params).toHaveProperty('globalState');
+    });
+
     test('serialized layers should be correctly updated after adding/removing layers', () => {
 
         let serializedStyle = style.serialize();
@@ -3356,5 +3377,34 @@ describe('Style.serialize', () => {
         style.update({transition: {duration: 0, delay: 0}} as EvaluationParameters);
         expect(style.sky.properties.get('fog-color').g).toBe(1);
         expect(style.sky.properties.get('fog-color').r).toBe(0);
+    });
+
+    test('Style.getDashes returns line atlas entries for dash patterns', async () => {
+        const style = createStyle();
+
+        const params = {
+            dashes: {
+                '2,1,false': {dasharray: [2, 1], round: false},
+                '4,2,true': {dasharray: [4, 2], round: true}
+            },
+            source: 'test-source',
+            tileID: {z: 1, x: 0, y: 0} as any,
+            type: 'dasharray' as const
+        };
+
+        const result = await style.getDashes('mapId', params);
+
+        expect(result).toBeDefined();
+        expect(Object.keys(result)).toHaveLength(2);
+        expect(result['2,1,false']).toBeDefined();
+        expect(result['4,2,true']).toBeDefined();
+
+        // Verify the entries have the expected atlas properties
+        expect(typeof result['2,1,false'].width).toBe('number');
+        expect(typeof result['2,1,false'].height).toBe('number');
+        expect(typeof result['2,1,false'].y).toBe('number');
+        expect(typeof result['4,2,true'].width).toBe('number');
+        expect(typeof result['4,2,true'].height).toBe('number');
+        expect(typeof result['4,2,true'].y).toBe('number');
     });
 });

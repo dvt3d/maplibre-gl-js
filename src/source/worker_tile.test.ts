@@ -11,6 +11,7 @@ import {type PossiblyEvaluated} from '../style/properties';
 import {Color} from '@maplibre/maplibre-gl-style-spec';
 import {type CirclePaintProps, type CirclePaintPropsPossiblyEvaluated} from '../style/style_layer/circle_style_layer_properties.g';
 import {type SymbolLayoutProps, type SymbolLayoutPropsPossiblyEvaluated} from '../style/style_layer/symbol_style_layer_properties.g';
+import {MessageType} from '../util/actor_messages';
 
 function createWorkerTile(params?: {globalState?: Record<string, any>}): WorkerTile {
     return new WorkerTile({
@@ -78,7 +79,7 @@ describe('worker tile', () => {
             layout: {
                 'line-join': ['global-state', 'test']
             }
-        }]);
+        }], {test: 'bevel'});
 
         const tile = createWorkerTile({
             globalState: {test: 'bevel'}
@@ -96,7 +97,7 @@ describe('worker tile', () => {
             paint: {
                 'fill-extrusion-height': ['global-state', 'test']
             }
-        }]);
+        }], {test: 1});
 
         const tile = createWorkerTile({
             globalState: {test: 1}
@@ -175,6 +176,14 @@ describe('worker tile', () => {
                 'text-font': ['StandardFont-Bold'],
                 'text-field': '{name}'
             }
+        }, {
+            id: 'line-layer',
+            type: 'line',
+            source: 'source',
+            'source-layer': 'test',
+            paint: {
+                'line-dasharray': ['case', ['has', 'road_type'], ['literal', [2, 1]], ['literal', [1, 2]]]
+            }
         }]);
 
         const data = {
@@ -200,10 +209,16 @@ describe('worker tile', () => {
         } as any as VectorTile;
 
         const sendAsync = vi.fn().mockImplementation((message: {type: string; data: any}) => {
-            const response = message.type === 'getImages' ?
-                {'hello': {width: 1, height: 1, data: new Uint8Array([0])}} :
-                {'StandardFont-Bold': {width: 1, height: 1, data: new Uint8Array([0])}};
-            return Promise.resolve(response);
+            if (message.type === MessageType.getImages) {
+                return Promise.resolve({'hello': {width: 1, height: 1, data: new Uint8Array([0])}});
+            } else if (message.type === MessageType.getGlyphs) {
+                return Promise.resolve({'StandardFont-Bold': {width: 1, height: 1, data: new Uint8Array([0])}});
+            } else if (message.type === MessageType.getDashes) {
+                return Promise.resolve({
+                    '2,1,false': {y: 0, height: 16, width: 256},
+                    '1,2,false': {y: 16, height: 16, width: 256}
+                });
+            }
         });
 
         const actorMock = {
@@ -211,10 +226,11 @@ describe('worker tile', () => {
         };
         const result = await tile.parse(data, layerIndex, ['hello'], actorMock, SubdivisionGranularitySetting.noSubdivision);
         expect(result).toBeDefined();
-        expect(sendAsync).toHaveBeenCalledTimes(3);
-        expect(sendAsync).toHaveBeenCalledWith(expect.objectContaining({data: expect.objectContaining({'icons': ['hello'], 'type': 'icons'})}), expect.any(Object));
-        expect(sendAsync).toHaveBeenCalledWith(expect.objectContaining({data: expect.objectContaining({'icons': ['hello'], 'type': 'patterns'})}), expect.any(Object));
-        expect(sendAsync).toHaveBeenCalledWith(expect.objectContaining({data: expect.objectContaining({'source': 'source', 'type': 'glyphs', 'stacks': {'StandardFont-Bold': [101, 115, 116]}})}), expect.any(Object));
+        expect(sendAsync).toHaveBeenCalledTimes(4); // icons, patterns, glyphs, dashes
+        expect(sendAsync).toHaveBeenCalledWith(expect.objectContaining({type: 'GI', data: expect.objectContaining({'icons': ['hello'], 'type': 'icons'})}), expect.any(Object));
+        expect(sendAsync).toHaveBeenCalledWith(expect.objectContaining({type: 'GI', data: expect.objectContaining({'icons': ['hello'], 'type': 'patterns'})}), expect.any(Object));
+        expect(sendAsync).toHaveBeenCalledWith(expect.objectContaining({type: 'GG', data: expect.objectContaining({'source': 'source', 'type': 'glyphs', 'stacks': {'StandardFont-Bold': [101, 115, 116]}})}), expect.any(Object));
+        expect(sendAsync).toHaveBeenCalledWith(expect.objectContaining({type: 'GDA', data: expect.objectContaining({'dashes': expect.any(Object)})}), expect.any(Object));
     });
 
     test('WorkerTile.parse would cancel and only event once on repeated reparsing', async () => {
@@ -292,7 +308,8 @@ describe('worker tile', () => {
         expect(sendAsync).toHaveBeenCalledWith(expect.objectContaining({data: expect.objectContaining({'source': 'source', 'type': 'glyphs', 'stacks': {'StandardFont-Bold': [101, 115, 116]}})}), expect.any(Object));
     });
 
-    test('WorkerTile.parse passes global-state to layers', async () => {
+    test('WorkerTile.parse passes global-state to layout properties', async () => {
+        const globalState = {} as any;
         const layerIndex = new StyleLayerIndex([
             {
                 id: 'layer-id',
@@ -302,9 +319,8 @@ describe('worker tile', () => {
                     'text-size': ['global-state', 'size']
                 }
             }
-        ]);
+        ], globalState);
 
-        const globalState = {} as any;
         const tile = createWorkerTile({globalState});
         globalState.size = 12;
         await tile.parse(createLineWrapper(), layerIndex, [], {} as any, SubdivisionGranularitySetting.noSubdivision);
@@ -314,7 +330,7 @@ describe('worker tile', () => {
         expect(layout.get('text-size').evaluate({} as any, {})).toBe(12);
     });
 
-    test('WorkerTile.parse uses global state from parameters if not set on layer when recalculating layout properties', async () => {
+    test('WorkerTile.parse passes global-state to paint properties', async () => {
         const layerIndex = new StyleLayerIndex([
             {
                 id: 'circle',
@@ -325,12 +341,12 @@ describe('worker tile', () => {
                     'circle-radius': ['global-state', 'radius']
                 }
             }
-        ]);
+        ], {radius: 15, color: '#FF0000'});
 
         const tile = createWorkerTile({});
         await tile.parse(createLineWrapper(), layerIndex, [], {} as any, SubdivisionGranularitySetting.noSubdivision);
         const layer = layerIndex._layers['circle'];
-        layer.recalculate({zoom: 0, globalState: {radius: 15, color: '#FF0000'} as Record<string, any>} as EvaluationParameters, []);
+        layer.recalculate({zoom: 0} as EvaluationParameters, []);
         const paint = layer.paint as PossiblyEvaluated<CirclePaintProps, CirclePaintPropsPossiblyEvaluated>;
         expect(paint.get('circle-color').evaluate({} as any, {})).toEqual(new Color(1, 0, 0, 1));
         expect(paint.get('circle-radius').evaluate({} as any, {})).toBe(15);
