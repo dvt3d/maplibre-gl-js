@@ -64,6 +64,14 @@ import {isCustomStyleLayer} from '../style/style_layer/custom_style_layer';
 
 export type RenderPass = 'offscreen' | 'opaque' | 'translucent';
 
+type RenderHookPhase =
+    | 'beforeOpaque'
+    | 'afterOpaque'
+    | 'beforeTranslucent'
+    | 'afterTranslucent';
+
+type RenderHook = (painter: Painter) => void;
+
 type PainterOptions = {
     showOverdrawInspector: boolean;
     showTileBoundaries: boolean;
@@ -134,6 +142,8 @@ export class Painter {
     // of the terrain-facilitators. e.g. depth & coords framebuffers
     // every time the camera-matrix changes the terrain-facilitators will be redrawn.
     terrainFacilitator: {dirty: boolean; matrix: mat4; renderTime: number};
+
+    _renderHooks: Map<RenderHookPhase, RenderHook[]> = new Map();
 
     constructor(gl: WebGLRenderingContext | WebGL2RenderingContext, transform: IReadonlyTransform) {
         this.context = new Context(gl);
@@ -560,6 +570,7 @@ export class Painter {
         this._showOverdrawInspector = options.showOverdrawInspector;
         this.depthRangeFor3D = [0, 1 - ((style._order.length + 2) * this.numSublayers * this.depthEpsilon)];
 
+        this._runRenderHooks('beforeOpaque');
         // Opaque pass ===============================================
         // Draw opaque layers top-to-bottom first.
         if (!this.renderToTexture) {
@@ -574,6 +585,9 @@ export class Painter {
                 this.renderLayer(this, tileManager, layer, coords, renderOptions);
             }
         }
+
+        this._runRenderHooks('afterOpaque');
+        this._runRenderHooks('beforeTranslucent');
 
         // Translucent pass ===============================================
         // Draw all other layers bottom-to-top.
@@ -604,6 +618,8 @@ export class Painter {
             this._renderTileClippingMasks(layer, coordsAscending[layer.source], !!this.renderToTexture);
             this.renderLayer(this, tileManager, layer, coords, renderOptions);
         }
+
+        this._runRenderHooks('afterTranslucent');
 
         // Render atmosphere, only for Globe projection
         if (renderOptions.isRenderingGlobe) {
@@ -842,5 +858,31 @@ export class Painter {
     overLimit() {
         const {drawingBufferWidth, drawingBufferHeight} = this.context.gl;
         return this.width !== drawingBufferWidth || this.height !== drawingBufferHeight;
+    }
+
+    /**
+     *
+     * @param phase
+     */
+    _runRenderHooks(phase: RenderHookPhase) {
+        const hooks = this._renderHooks.get(phase);
+        if (!hooks) return;
+        for (const hook of hooks) {
+            hook(this);
+        }
+    }
+
+    /**
+     *
+     * @param phase
+     * @param hook
+     */
+    addRenderHook(phase: RenderHookPhase, hook: RenderHook) {
+        let list = this._renderHooks.get(phase);
+        if (!list) {
+            list = [];
+            this._renderHooks.set(phase, list);
+        }
+        list.push(hook);
     }
 }
