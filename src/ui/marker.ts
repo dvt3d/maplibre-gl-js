@@ -123,6 +123,8 @@ export type MarkerOptions = {
  * **Event** `drag` of type {@link Event} will be fired while dragging.
  *
  * **Event** `dragend` of type {@link Event} will be fired when the marker is finished being dragged.
+ *
+ * **Event** `click` of type {@link Event} will be fired when the marker is clicked.
  */
 export class Marker extends Evented {
     _map: Map;
@@ -292,6 +294,7 @@ export class Marker extends Evented {
             e.preventDefault();
         });
         applyAnchorClass(this._element, this._anchor, 'marker');
+        this._element.addEventListener('click', this._onClick);
 
         if (options && options.className) {
             for (const name of options.className.split(' ')) {
@@ -493,6 +496,10 @@ export class Marker extends Evented {
         return this;
     }
 
+    _onClick = (e: MouseEvent) => {
+        this.fire(new Event('click', {originalEvent: e}));
+    };
+
     _onKeyPress = (e: KeyboardEvent) => {
         const code = e.code;
         const legacyCode = e.charCode || e.keyCode;
@@ -579,7 +586,7 @@ export class Marker extends Evented {
         // Read depth framebuffer, getting position of terrain in line of sight to marker
         const terrainDistance = map.terrain.depthAtPoint(this._pos);
         // Transform marker position to clip space
-        const elevation = map.terrain.getElevationForLngLatZoom(this._lngLat, map.transform.tileZoom);
+        const elevation = map.terrain.getElevationForLngLat(this._lngLat, map.transform);
         const markerDistance = map.transform.lngLatToCameraDepth(this._lngLat, elevation);
         const forgiveness = .006;
         if (markerDistance - terrainDistance < forgiveness) {
@@ -637,7 +644,7 @@ export class Marker extends Evented {
 
         DOM.setTransform(this._element, `${anchorTranslate[this._anchor]} translate(${this._pos.x}px, ${this._pos.y}px) ${pitch} ${rotation}`);
 
-        browser.frameAsync(new AbortController()).then(() => { // Run _updateOpacity only after painter.render and drawDepth
+        browser.frameAsync(new AbortController(), this._map._ownerWindow).then(() => { // Run _updateOpacity only after painter.render and drawDepth
             this._updateOpacity(e && e.type === 'moveend');
         }).catch(() => {});
     };

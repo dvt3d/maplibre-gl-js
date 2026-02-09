@@ -1,28 +1,46 @@
-import {createAbortError} from './abort_error';
+import {AbortError} from './abort_error';
 import {subscribe} from './util';
 
 let linkEl;
 
 let reducedMotionQuery: MediaQueryList;
+let reducedMotionOverride: boolean | undefined;
 
 /** */
 export const browser = {
-    frame(abortController: AbortController, fn: (paintStartTimestamp: number) => void, reject: (error: Error) => void): void {
-        const frameId = requestAnimationFrame((paintStartTimestamp)=>{
+    /**
+     * Schedules a callback to be invoked on the next animation frame.
+     * @param abortController - Controller to abort the scheduled frame.
+     * @param fn - Callback to invoke with the paint start timestamp.
+     * @param reject - Callback to invoke if the frame is aborted.
+     * @param targetWindow - Optional window to use for requestAnimationFrame.
+     *   When the map is rendered in a popup window or iframe, pass the owning
+     *   window to ensure animation frames continue even when the main window
+     *   is not focused.
+     */
+    frame(abortController: AbortController, fn: (paintStartTimestamp: number) => void, reject: (error: Error) => void, targetWindow?: Window): void {
+        const win = targetWindow || window;
+        const frameId = win.requestAnimationFrame((paintStartTimestamp)=>{
             unsubscribe();
             fn(paintStartTimestamp);
         });
 
         const {unsubscribe} = subscribe(abortController.signal, 'abort', () => {
             unsubscribe();
-            cancelAnimationFrame(frameId);
-            reject(createAbortError());
+            win.cancelAnimationFrame(frameId);
+            reject(new AbortError(abortController.signal.reason));
         }, false);
     },
 
-    frameAsync(abortController: AbortController): Promise<number> {
+    /**
+     * Returns a promise that resolves on the next animation frame.
+     * @param abortController - Controller to abort the scheduled frame.
+     * @param targetWindow - Optional window to use for requestAnimationFrame.
+     * @see {@link browser.frame}
+     */
+    frameAsync(abortController: AbortController, targetWindow?: Window): Promise<number> {
         return new Promise((resolve, reject) => {
-            this.frame(abortController, resolve, reject);
+            this.frame(abortController, resolve, reject, targetWindow);
         });
     },
 
@@ -52,6 +70,7 @@ export const browser = {
     hardwareConcurrency: typeof navigator !== 'undefined' && navigator.hardwareConcurrency || 4,
 
     get prefersReducedMotion(): boolean {
+        if (reducedMotionOverride !== undefined) return reducedMotionOverride;
         // In case your test crashes when checking matchMedia, call setMatchMedia from 'src/util/test/util'
         if (!matchMedia) return false;
         //Lazily initialize media query
@@ -60,4 +79,8 @@ export const browser = {
         }
         return reducedMotionQuery.matches;
     },
+
+    set prefersReducedMotion(value: boolean) {
+        reducedMotionOverride = value;
+    }
 };

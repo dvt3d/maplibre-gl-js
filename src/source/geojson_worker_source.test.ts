@@ -4,15 +4,183 @@ import {StyleLayerIndex} from '../style/style_layer_index';
 import {OverscaledTileID} from '../tile/tile_id';
 import perf from '../util/performance';
 import {type LayerSpecification} from '@maplibre/maplibre-gl-style-spec';
-import {type Actor} from '../util/actor';
-import {type WorkerTileParameters} from './worker_source';
+import {type Actor, type IActor} from '../util/actor';
+import {type TileParameters, type WorkerTileParameters, type WorkerTileResult} from './worker_source';
 import {setPerformance, sleep} from '../util/test/util';
 import {type FakeServer, fakeServer} from 'nise';
+import {GEOJSON_TILE_LAYER_NAME} from '@maplibre/vt-pbf';
+import {SubdivisionGranularitySetting} from '../render/subdivision_granularity_settings';
+import {type WorkerTile} from './worker_tile';
 
 const actor = {send: () => {}} as any as Actor;
 
 beforeEach(() => {
     setPerformance();
+});
+
+afterEach(() => {
+    vi.clearAllMocks();
+});
+
+describe('geojson tile worker source', () => {
+    const actor: IActor = {sendAsync: () => Promise.resolve({})} as any as IActor;
+
+    test('GeoJSONWorkerSource.removeTile removes loaded tile', async () => {
+        const source = new GeoJSONWorkerSource(actor, new StyleLayerIndex(), []);
+
+        source.tileState.loaded = {
+            '0': {} as WorkerTile
+        };
+
+        const res = await source.removeTile({
+            source: 'source',
+            uid: 0
+        } as any as TileParameters);
+        expect(res).toBeUndefined();
+
+        expect(source.tileState.loaded).toEqual({});
+    });
+
+    test('GeoJSONWorkerSource.reloadTile reloads a previously-loaded tile', async () => {
+        const source = new GeoJSONWorkerSource(actor, new StyleLayerIndex(), []);
+        const parse = vi.fn().mockResolvedValue({} as WorkerTileResult);
+
+        source.tileState.loaded = {
+            '0': {
+                status: 'done',
+                vectorTile: {},
+                parse
+            } as any as WorkerTile
+        };
+
+        const reloadPromise = source.reloadTile({uid: 0} as any as WorkerTileParameters);
+        expect(parse).toHaveBeenCalledTimes(1);
+        await expect(reloadPromise).resolves.toBeTruthy();
+    });
+
+    test('GeoJSONWorkerSource.reloadTile returns parse result without rawTileData when parsing state was already consumed', async () => {
+        const source = new GeoJSONWorkerSource(actor, new StyleLayerIndex(), []);
+        const parseResult = {buckets: []} as any as WorkerTileResult;
+        const parse = vi.fn().mockResolvedValue(parseResult);
+
+        source.tileState.loaded = {
+            '0': {
+                status: 'parsing',
+                vectorTile: {},
+                parse
+            } as any as WorkerTile
+        };
+
+        const result = await source.reloadTile({uid: 0} as any as WorkerTileParameters);
+
+        expect(parse).toHaveBeenCalledTimes(1);
+        expect(result).toBe(parseResult);
+        expect(result.rawTileData).toBeUndefined();
+    });
+
+    test('GeoJSONWorkerSource.loadTile reparses tile if reloadTile has been called during parsing', async () => {
+        const layerIndex = new StyleLayerIndex([{
+            id: 'test',
+            source: 'source',
+            'source-layer': '_geojsonTileLayer',
+            type: 'symbol',
+            layout: {
+                'icon-image': 'hello',
+                'text-font': ['StandardFont-Bold'],
+                'text-field': '{name}'
+            }
+        }]);
+
+        const actor = {
+            sendAsync: (message: {type: string; data: unknown}, abortController: AbortController) => {
+                return new Promise((resolve, _reject) => {
+                    const res = setTimeout(() => {
+                        const response = message.type === 'getImages' ?
+                            {'hello': {width: 1, height: 1, data: new Uint8Array([0])}} :
+                            {'StandardFont-Bold': {width: 1, height: 1, data: new Uint8Array([0])}};
+                        resolve(response);
+                    }, 100);
+                    abortController.signal.addEventListener('abort', () => {
+                        clearTimeout(res);
+                    });
+                });
+            }
+        };
+
+        const source = new GeoJSONWorkerSource(actor as any, layerIndex, ['hello']);
+
+        const geoJson = {
+            type: 'FeatureCollection',
+            features: [{
+                type: 'Feature',
+                id: 1,
+                geometry: {
+                    type: 'Point',
+                    coordinates: [0, 0]
+                },
+                properties: {
+                    name: 'test'
+                }
+            }]
+        } as GeoJSON.GeoJSON;
+
+        await source.loadData({source: 'source', data: geoJson} as LoadGeoJSONParameters);
+
+        source.loadTile({
+            source: 'source',
+            uid: 0,
+            tileID: {overscaledZ: 0, wrap: 0, canonical: {x: 0, y: 0, z: 0, w: 0}},
+            subdivisionGranularity: SubdivisionGranularitySetting.noSubdivision,
+        } as any as WorkerTileParameters).then(() => expect(false).toBeTruthy());
+
+        // allow promise to run
+        await sleep(0);
+
+        const res = await source.reloadTile({
+            source: 'source',
+            uid: 0,
+            tileID: {overscaledZ: 0, wrap: 0, canonical: {x: 0, y: 0, z: 0, w: 0}},
+            subdivisionGranularity: SubdivisionGranularitySetting.noSubdivision,
+        } as any as WorkerTileParameters);
+
+        expect(res).toBeDefined();
+        expect(res.rawTileData).toBeDefined();
+    });
+
+    test('GeoJSONWorkerSource.loadTile returns null for an empty tile', async () => {
+        const source = new GeoJSONWorkerSource(actor, new StyleLayerIndex(), []);
+        await source.loadData({source: 'source', data: {type: 'FeatureCollection', features: []}} as LoadGeoJSONParameters);
+
+        const result = await source.loadTile({
+            source: 'source',
+            uid: 0,
+            tileID: {overscaledZ: 0, wrap: 0, canonical: {x: 0, y: 0, z: 0, w: 0}},
+        } as any as WorkerTileParameters);
+
+        expect(result).toBeNull();
+    });
+
+    test('GeoJSONWorkerSource.loadTile throws error when data has not been loaded', async () => {
+        const source = new GeoJSONWorkerSource(actor, new StyleLayerIndex(), []);
+
+        await expect(source.loadTile({
+            source: 'source',
+            uid: 0,
+            tileID: {overscaledZ: 0, wrap: 0, canonical: {x: 0, y: 0, z: 0, w: 0}},
+        } as any as WorkerTileParameters)).rejects.toThrowError(/Unable to parse the data into a cluster or geojson/);
+    });
+
+    test('GeoJSONWorkerSource.abortTile aborts tile state', async () => {
+        const source = new GeoJSONWorkerSource(actor, new StyleLayerIndex(), []);
+        const abortSpy = vi.spyOn(source.tileState, 'abort');
+
+        await source.abortTile({
+            source: 'source',
+            uid: 0
+        } as any as TileParameters);
+
+        expect(abortSpy).toHaveBeenCalledWith(0);
+    });
 });
 
 describe('reloadTile', () => {
@@ -41,7 +209,7 @@ describe('reloadTile', () => {
             maxZoom: 10
         };
 
-        await source.loadData({source: 'sourceId', data: JSON.stringify(geoJson)} as LoadGeoJSONParameters);
+        await source.loadData({source: 'sourceId', data: geoJson} as LoadGeoJSONParameters);
 
         // first call should load vector data from geojson
         const firstData = await source.reloadTile(tileParams as any as WorkerTileParameters);
@@ -57,7 +225,7 @@ describe('reloadTile', () => {
         expect(spy).toHaveBeenCalledTimes(1);
 
         // replace geojson data
-        await source.loadData({source: 'sourceId', data: JSON.stringify(geoJson)} as LoadGeoJSONParameters);
+        await source.loadData({source: 'sourceId', data: geoJson} as LoadGeoJSONParameters);
 
         // should call loadVectorData again after changing geojson data
         data = await source.reloadTile(tileParams as any as WorkerTileParameters);
@@ -66,6 +234,49 @@ describe('reloadTile', () => {
         expect(spy).toHaveBeenCalledTimes(2);
     });
 
+    test('handles null and undefined properties during tile serialization', async () => {
+        const layers = [
+            {
+                id: 'mylayer',
+                source: 'sourceId',
+                type: 'symbol',
+            }
+        ] as LayerSpecification[];
+        const layerIndex = new StyleLayerIndex(layers);
+        const source = new GeoJSONWorkerSource(actor, layerIndex, []);
+        const geoJson = {
+            'type': 'Feature',
+            'geometry': {
+                'type': 'Point',
+                'coordinates': [0, 0]
+            },
+            'properties': {
+                'nullProperty': null,
+                'undefinedProperty': undefined,
+                'stringProperty': 'string'
+            }
+        };
+        const tileParams = {
+            source: 'sourceId',
+            uid: 0,
+            tileID: new OverscaledTileID(0, 0, 0, 0, 0),
+            maxZoom: 10
+        };
+
+        await source.loadData({type: 'geojson', source: 'sourceId', data: geoJson} as LoadGeoJSONParameters);
+
+        // load vector data from geojson, passing through the tile serialization step
+        const data = await source.reloadTile(tileParams as any as WorkerTileParameters);
+        expect(data.featureIndex).toBeDefined();
+
+        // deserialize tile layers in the feature index
+        data.featureIndex.rawTileData = data.rawTileData;
+        const featureLayers = data.featureIndex.loadVTLayers();
+        expect(Object.keys(featureLayers)).toHaveLength(1);
+
+        // validate supported features are present in the index
+        expect(featureLayers[GEOJSON_TILE_LAYER_NAME].feature(0).properties['stringProperty']).toBeDefined();
+    });
 });
 
 describe('resourceTiming', () => {
@@ -111,7 +322,7 @@ describe('resourceTiming', () => {
 
         const layerIndex = new StyleLayerIndex(layers);
         const source = new GeoJSONWorkerSource(actor, layerIndex, []);
-        source.loadGeoJSON = () => Promise.resolve(geoJson);
+        source.loadGeoJSONFromUrl = () => Promise.resolve(geoJson);
 
         const result = await source.loadData({source: 'testSource', request: {url: 'http://localhost/nonexistent', collectResourceTiming: true}} as LoadGeoJSONParameters);
 
@@ -142,7 +353,7 @@ describe('resourceTiming', () => {
 
         const layerIndex = new StyleLayerIndex(layers);
         const source = new GeoJSONWorkerSource(actor, layerIndex, []);
-        source.loadGeoJSON = () => Promise.resolve(geoJson);
+        source.loadGeoJSONFromUrl = () => Promise.resolve(geoJson);
 
         const result = await source.loadData({source: 'testSource', request: {url: 'http://localhost/nonexistent', collectResourceTiming: true}} as LoadGeoJSONParameters);
 
@@ -155,8 +366,9 @@ describe('resourceTiming', () => {
         const layerIndex = new StyleLayerIndex(layers);
         const source = new GeoJSONWorkerSource(actor, layerIndex, []);
 
-        const result = await source.loadData({source: 'testSource', data: JSON.stringify(geoJson)} as LoadGeoJSONParameters);
+        const result = await source.loadData({source: 'testSource', data: geoJson} as LoadGeoJSONParameters);
         expect(result.resourceTiming).toBeUndefined();
+        expect(result.data).toBeUndefined();
     });
 
 });
@@ -275,14 +487,14 @@ describe('loadData', () => {
     test('loadData with geojson creates an non-updateable source', async () => {
         const worker = new GeoJSONWorkerSource(actor, layerIndex, []);
 
-        await worker.loadData({source: 'source1', data: JSON.stringify(geoJson)} as LoadGeoJSONParameters);
+        await worker.loadData({source: 'source1', data: geoJson} as LoadGeoJSONParameters);
         await expect(worker.loadData({source: 'source1', dataDiff: {removeAll: true}} as LoadGeoJSONParameters)).rejects.toBeDefined();
     });
 
     test('loadData with geojson creates an updateable source', async () => {
         const worker = new GeoJSONWorkerSource(actor, layerIndex, []);
 
-        await worker.loadData({source: 'source1', data: JSON.stringify(updateableGeoJson)} as LoadGeoJSONParameters);
+        await worker.loadData({source: 'source1', data: updateableGeoJson} as LoadGeoJSONParameters);
         await expect(worker.loadData({source: 'source1', dataDiff: {removeAll: true}} as LoadGeoJSONParameters)).resolves.toBeDefined();
     });
 
@@ -296,7 +508,8 @@ describe('loadData', () => {
         const load1Promise = worker.loadData({source: 'source1', request: {url: ''}} as LoadGeoJSONParameters);
         server.respond();
 
-        await load1Promise;
+        const result = await load1Promise;
+        expect(result.data).toStrictEqual(updateableGeoJson);
         await expect(worker.loadData({source: 'source1', dataDiff: {removeAll: true}} as LoadGeoJSONParameters)).resolves.toBeDefined();
     });
 
@@ -319,15 +532,17 @@ describe('loadData', () => {
     test('loadData with diff updates', async () => {
         const worker = new GeoJSONWorkerSource(actor, layerIndex, []);
 
-        await worker.loadData({source: 'source1', data: JSON.stringify(updateableGeoJson)} as LoadGeoJSONParameters);
-        await expect(worker.loadData({source: 'source1', dataDiff: {
+        await worker.loadData({source: 'source1', data: updateableGeoJson} as LoadGeoJSONParameters);
+        const result = await worker.loadData({source: 'source1', dataDiff: {
             add: [{
                 type: 'Feature',
                 id: 'update_point',
                 geometry: {type: 'Point', coordinates: [0, 0]},
                 properties: {}
             }]
-        }} as LoadGeoJSONParameters)).resolves.toBeDefined();
+        }} as LoadGeoJSONParameters);
+        expect(result).toBeDefined();
+        expect(result.data).toBeUndefined();
     });
 
     test('loadData should reject as first call with no data', async () => {
@@ -339,7 +554,7 @@ describe('loadData', () => {
     test('loadData should resolve as subsequent call with no data', async () => {
         const worker = new GeoJSONWorkerSource(actor, layerIndex, []);
 
-        await worker.loadData({source: 'source1', data: JSON.stringify(updateableGeoJson)} as LoadGeoJSONParameters);
+        await worker.loadData({source: 'source1', data: updateableGeoJson} as LoadGeoJSONParameters);
         await expect(worker.loadData({} as LoadGeoJSONParameters)).resolves.toBeDefined();
     });
 
@@ -347,7 +562,7 @@ describe('loadData', () => {
         const mockCreateGeoJSONIndex = vi.fn(createGeoJSONIndex);
         const worker = new GeoJSONWorkerSource(actor, layerIndex, [], mockCreateGeoJSONIndex);
 
-        await worker.loadData({source: 'source1', data: JSON.stringify(updateableFeatureCollection), cluster: false} as LoadGeoJSONParameters);
+        await worker.loadData({source: 'source1', data: updateableFeatureCollection, cluster: false} as LoadGeoJSONParameters);
         expect(mockCreateGeoJSONIndex.mock.calls[0][1].cluster).toBe(false);
         await expect(worker.loadData({cluster: true} as LoadGeoJSONParameters)).resolves.toBeDefined();
         expect(mockCreateGeoJSONIndex.mock.calls[1][1].cluster).toBe(true);
@@ -400,7 +615,7 @@ describe('getData', () => {
     test('getData returns correct geojson when the source was loaded with geojson', async () => {
         const worker = new GeoJSONWorkerSource(actor, layerIndex, []);
 
-        await worker.loadData({source: 'source1', data: JSON.stringify(geoJson)} as LoadGeoJSONParameters);
+        await worker.loadData({source: 'source1', data: geoJson} as LoadGeoJSONParameters);
         await expect(worker.getData()).resolves.toStrictEqual(geoJson);
     });
 
@@ -421,7 +636,7 @@ describe('getData', () => {
     test('getData after diff updates returns updated geojson', async () => {
         const worker = new GeoJSONWorkerSource(actor, layerIndex, []);
 
-        await worker.loadData({source: 'source1', data: JSON.stringify(updateableGeoJson)} as LoadGeoJSONParameters);
+        await worker.loadData({source: 'source1', data: updateableGeoJson} as LoadGeoJSONParameters);
         await expect(worker.loadData({source: 'source1', dataDiff: {
             add: [{
                 type: 'Feature',

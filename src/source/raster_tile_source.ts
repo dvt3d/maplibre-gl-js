@@ -7,6 +7,7 @@ import {Event, ErrorEvent, Evented} from '../util/evented';
 import {loadTileJson} from './load_tilejson';
 import {TileBounds} from '../tile/tile_bounds';
 import {Texture} from '../render/texture';
+import {isAbortError} from '../util/abort_error';
 
 import type {Source} from './source';
 import type {OverscaledTileID} from '../tile/tile_id';
@@ -92,7 +93,7 @@ export class RasterTileSource extends Evented implements Source {
         this.fire(new Event('dataloading', {dataType: 'source'}));
         this._tileJSONRequest = new AbortController();
         try {
-            const tileJSON = await loadTileJson(this._options, this.map._requestManager, this._tileJSONRequest);
+            const tileJSON = await loadTileJson(this._options, this.map._requestManager, this._tileJSONRequest, this.map._ownerWindow);
             this._tileJSONRequest = null;
             this._loaded = true;
             if (tileJSON) {
@@ -108,7 +109,11 @@ export class RasterTileSource extends Evented implements Source {
         } catch (err) {
             this._tileJSONRequest = null;
             this._loaded = true; // let's pretend it's loaded so the source will be ignored
-            this.fire(new ErrorEvent(err));
+
+            // only fire error event if it is not due to aborting the request
+            if (!isAbortError(err)) {
+                this.fire(new ErrorEvent(err));
+            }
         }
     }
 
